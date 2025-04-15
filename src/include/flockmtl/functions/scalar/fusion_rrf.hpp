@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flockmtl/functions/scalar/scalar.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 namespace flockmtl {
 

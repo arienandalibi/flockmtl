@@ -75,6 +75,13 @@ std::vector<int> FusionRRF::Operation(duckdb::DataChunk& args) {
 
 void FusionRRF::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& state, duckdb::Vector& result) {
     auto results = FusionRRF::Operation(args);
+    duckdb::ClientContext &context = state.GetContext();
+    auto &buffer_manager = duckdb::BufferManager::GetBufferManager(context);
+    auto handle = buffer_manager.Allocate(duckdb::MemoryTag::ALLOCATOR, 2048, true);
+    auto &file_buf = handle.GetFileBuffer();
+    auto data_ptr = file_buf.buffer;
+    std::cout << "Used memory: " << buffer_manager.GetUsedMemory() << std::endl;
+    std::cout << "Max memory: " << buffer_manager.GetMaxMemory() << std::endl;
 
     auto index = 0;
     for (const auto& res : results) {
