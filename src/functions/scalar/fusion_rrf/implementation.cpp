@@ -1,3 +1,4 @@
+#include "duckdb/parser/parser.hpp"
 #include "flockmtl/functions/scalar/fusion_rrf.hpp"
 
 namespace flockmtl {
@@ -45,13 +46,23 @@ std::vector<double> FusionRRF::Operation(duckdb::DataChunk& args) {
 
 void FusionRRF::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& state, duckdb::Vector& result) {
     auto results = FusionRRF::Operation(args);
-    duckdb::ClientContext &context = state.GetContext();
-    auto &buffer_manager = duckdb::BufferManager::GetBufferManager(context);
-    auto handle = buffer_manager.Allocate(duckdb::MemoryTag::ALLOCATOR, 2048, true);
-    auto &file_buf = handle.GetFileBuffer();
-    auto data_ptr = file_buf.buffer;
-    std::cout << "Used memory: " << buffer_manager.GetUsedMemory() << std::endl;
-    std::cout << "Max memory: " << buffer_manager.GetMaxMemory() << std::endl;
+    duckdb::ClientContext &ctx = state.GetContext();
+    // auto &buffer_manager = duckdb::BufferManager::GetBufferManager(context);
+    // auto handle = buffer_manager.Allocate(duckdb::MemoryTag::ALLOCATOR, 2048, true);
+    // auto &file_buf = handle.GetFileBuffer();
+    // auto data_ptr = file_buf.buffer;
+    // std::cout << "Used memory: " << buffer_manager.GetUsedMemory() << std::endl;
+    // std::cout << "Max memory: " << buffer_manager.GetMaxMemory() << std::endl;
+
+    std::string formatted_results;
+    for (int tmp_result : results) {
+        formatted_results += std::to_string(tmp_result) + ", ";
+    }
+    formatted_results.resize(formatted_results.length() - 2);
+
+    auto db = ctx.db;
+    duckdb::Connection con(*db);
+    auto tmp = con.Query("INSERT INTO test_table VALUES ((\"query1\"), (" + formatted_results + ")");
 
     auto index = 0;
     for (const auto& res : results) {
