@@ -55,14 +55,16 @@ void FusionRRF::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& state,
     // std::cout << "Max memory: " << buffer_manager.GetMaxMemory() << std::endl;
 
     std::string formatted_results;
-    for (int tmp_result : results) {
+    for (double tmp_result : results) {
         formatted_results += std::to_string(tmp_result) + ", ";
     }
     formatted_results.resize(formatted_results.length() - 2);
 
     auto db = ctx.db;
     duckdb::Connection con(*db);
-    auto tmp = con.Query("INSERT INTO test_table VALUES ((\"query1\"), (" + formatted_results + ")");
+    con.Query("CREATE TABLE IF NOT EXISTS test_table (query VARCHAR, result VARCHAR);");
+    std::cout << "Formatted results: " << formatted_results << std::endl;
+    auto tmp = con.Query("INSERT INTO test_table VALUES ('query1', '" + formatted_results + "');");
 
     auto index = 0;
     for (const auto& res : results) {
