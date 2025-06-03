@@ -20,13 +20,22 @@ std::string to_string(CacheableFunction function) {
 }
 
 // CacheEntry implementation
-std::string CacheEntry::get_result() const {
+std::string CacheEntry::get_result(duckdb::BufferManager &buffer_manager) {
     if (string_size == 0) {
         return "";
     }
     
+    // Pin the block to get access to the buffer
+    auto buffer_handle = buffer_manager.Pin(block_handle_pointer);
+    
+    // Read the data from the buffer
     const char* buffer_data = reinterpret_cast<const char*>(buffer_handle.Ptr());
-    return std::string(buffer_data, string_size);
+    std::string result(buffer_data, string_size);
+    
+    // Unpin the block when done
+    buffer_manager.Unpin(block_handle_pointer);
+    
+    return result;
 }
 
 CacheEntry CacheEntry::create(duckdb::BufferManager &buffer_manager, const std::string& result) {
@@ -40,7 +49,13 @@ CacheEntry CacheEntry::create(duckdb::BufferManager &buffer_manager, const std::
         std::memcpy(buffer_data, result.data(), buffer_size);
     }
     
-    return CacheEntry(std::move(buffer_handle), buffer_size);
+    // Get the block handle from the buffer handle
+    auto block_handle = buffer_handle.GetBlockHandle();
+    
+    // Unpin the buffer since we're storing the block handle
+    buffer_manager.Unpin(block_handle);
+    
+    return CacheEntry(std::move(block_handle), buffer_size);
 }
 
 // CacheTable implementation
@@ -52,7 +67,7 @@ void CacheTable::put(const std::string& key, const std::string& result, duckdb::
     cache_map[key] = std::move(entry);
 }
 
-std::unique_ptr<std::string> CacheTable::get(const std::string& key) {
+std::unique_ptr<std::string> CacheTable::get(const std::string& key, duckdb::BufferManager &buffer_manager) {
     std::shared_lock<std::shared_mutex> lock(cache_mutex);
     
     auto it = cache_map.find(key);
@@ -60,8 +75,8 @@ std::unique_ptr<std::string> CacheTable::get(const std::string& key) {
         return nullptr;
     }
     
-    // Get result from buffer
-    auto result = it->second->get_result();
+    // Get result from buffer using pin/unpin pattern
+    auto result = it->second->get_result(buffer_manager);
     return std::make_unique<std::string>(std::move(result));
 }
 
@@ -94,12 +109,14 @@ std::string CacheManager::serialize_data_chunk(const duckdb::DataChunk& args) {
         auto model_details_json = CastVectorOfStructsToJson(args.data[0], 1)[0];
         oss << "model:" << model_details_json.dump() << ";";
     }
+    std::cout << "Testing, after model: " << oss.str() << std::endl;
     
     // Extract prompt details from args.data[1]
     if (args.ColumnCount() > 1) {
         auto prompt_details_json = CastVectorOfStructsToJson(args.data[1], 1)[0];
         oss << "prompt:" << prompt_details_json.dump() << ";";
     }
+    std::cout << "Testing, after prompt: " << oss.str() << std::endl;
     
     // Extract input tuples from args.data[2] if present
     if (args.ColumnCount() > 2) {
@@ -112,6 +129,7 @@ std::string CacheManager::serialize_data_chunk(const duckdb::DataChunk& args) {
             }
         }
         oss << ";";
+        std::cout << "Testing, after input tuples: " << oss.str() << std::endl;
     }
     
     return oss.str();
@@ -139,12 +157,16 @@ void CacheManager::store_result(const std::string& provider, const std::string& 
     auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
     
     CacheTable* table = get_or_create_table(table_name);
+    std::cout << "Testing, storing result." << std::endl;
+    std::cout << "Key: " << key << std::endl;
+    std::cout << "Result: " << result << std::endl;
     table->put(key, result, buffer_manager);
 }
 
 std::unique_ptr<std::string> CacheManager::get_cached_result(const std::string& provider,
                                                             const std::string& model, CacheableFunction function,
-                                                            const duckdb::DataChunk& args) {
+                                                            const duckdb::DataChunk& args,
+                                                            duckdb::ExpressionState& state) {
     std::string table_name = get_table_name(provider, model, function);
     
     {
@@ -156,7 +178,10 @@ std::unique_ptr<std::string> CacheManager::get_cached_result(const std::string& 
         
         std::string key = serialize_data_chunk(args);
         
-        return it->second->get(key);
+        // Get BufferManager from the state's context
+        auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
+        
+        return it->second->get(key, buffer_manager);
     }
 }
 

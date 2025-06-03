@@ -1,8 +1,8 @@
 #pragma once
 #include "flockmtl/core/common.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
+#include "duckdb/storage/block_manager.hpp"
 #include <unordered_map>
-#include <vector>
 #include <string>
 #include <memory>
 #include <shared_mutex>
@@ -16,14 +16,14 @@ std::string to_string(CacheableFunction function);
 
 // Structure to hold cached results in buffer blocks
 struct CacheEntry {
-    duckdb::BufferHandle buffer_handle;
+    duckdb::shared_ptr<duckdb::BlockHandle> block_handle_pointer;
     idx_t string_size;     // Size of the stored string in bytes
     
-    CacheEntry(duckdb::BufferHandle handle, idx_t size) 
-        : buffer_handle(std::move(handle)), string_size(size) {}
+    CacheEntry(duckdb::shared_ptr<duckdb::BlockHandle> handle, idx_t size)
+        : block_handle_pointer(std::move(handle)), string_size(size) {}
     
     // Get the result from the buffer
-    std::string get_result() const;
+    std::string get_result(duckdb::BufferManager &buffer_manager);
     
     // Store result in the buffer
     static CacheEntry create(duckdb::BufferManager &buffer_manager, const std::string& result);
@@ -42,7 +42,7 @@ public:
     void put(const std::string& key, const std::string& result, duckdb::BufferManager &buffer_manager);
     
     // Retrieve result from cache (returns nullptr if not found)
-    std::unique_ptr<std::string> get(const std::string& key);
+    std::unique_ptr<std::string> get(const std::string& key, duckdb::BufferManager &buffer_manager);
     
     // Check if key exists
     bool contains(const std::string& key);
@@ -73,7 +73,8 @@ public:
     // Retrieve cached result if available
     static std::unique_ptr<std::string> get_cached_result(const std::string& provider, 
                                                          const std::string& model, CacheableFunction function,
-                                                         const duckdb::DataChunk& args);
+                                                         const duckdb::DataChunk& args,
+                                                         duckdb::ExpressionState& state);
     
     // Check if result is cached
     static bool is_cached(const std::string& provider, const std::string& model, CacheableFunction function,

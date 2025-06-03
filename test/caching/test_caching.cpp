@@ -1,0 +1,25 @@
+#include "flockmtl-test/functions/scalar/test_fusion.hpp"
+#include "flockmtl/caching/cache_manager.hpp"
+
+using namespace duckdb;
+
+void setup_db(const unique_ptr<Connection>& con) {
+    con->Query("CREATE SECRET (TYPE OLLAMA, API_URL '10.0.0.230:11434');" );
+    con->Query(R"(CREATE MODEL('deepseek', 'deepseek-r1', 'ollama', {"context_window": 8192, "max_output_tokens": 8000}))");
+}
+
+TEST_CASE("Test caching", "[caching][flockmtl]") {
+    // Initialize an in-memory DuckDB instanceAdd commentMore actions
+    auto db = make_uniq<DuckDB>(nullptr);
+    auto con = make_uniq<Connection>(*db);
+
+    // Set up the database
+    setup_db(con);
+    auto result = con->Query(R"(SELECT llm_complete(
+            {'model_name': 'deepseek'},
+            {'prompt': 'Explain the purpose of FlockMTL. Limit your response to 10 words.'}
+        ) AS flockmtl_purpose;)");
+
+    // Ensure query executed successfully
+    REQUIRE(!result->HasError());
+}

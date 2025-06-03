@@ -1,3 +1,4 @@
+#include "flockmtl/caching/cache_manager.hpp"
 #include "flockmtl/functions/scalar/llm_complete.hpp"
 
 namespace flockmtl {
@@ -50,7 +51,13 @@ std::vector<std::string> LlmComplete::Operation(duckdb::DataChunk& args) {
 
 void LlmComplete::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& state, duckdb::Vector& result) {
 
+    auto cached_result = CacheManager::get_cached_result("ollama", "deepseek", CacheableFunction::LlmComplete, args, state);
+    if (cached_result) {
+        std::cout << "Cached response retreived: " << *cached_result << std::endl;
+    }
+
     auto results = LlmComplete::Operation(args);
+    CacheManager::store_result("ollama", "deepseek", CacheableFunction::LlmComplete, args, results[0], state);
 
     auto index = 0;
     for (const auto& res : results) {
