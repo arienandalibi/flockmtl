@@ -32,8 +32,7 @@ std::string CacheEntry::get_result(duckdb::BufferManager &buffer_manager) {
     const char* buffer_data = reinterpret_cast<const char*>(buffer_handle.Ptr());
     std::string result(buffer_data, string_size);
     
-    // Unpin the block when done
-    buffer_manager.Unpin(block_handle_pointer);
+    // No need to unpin the block once again, it happens automatically when buffer_handle goes out of scope
     
     return result;
 }
@@ -52,8 +51,7 @@ CacheEntry CacheEntry::create(duckdb::BufferManager &buffer_manager, const std::
     // Get the block handle from the buffer handle
     auto block_handle = buffer_handle.GetBlockHandle();
     
-    // Unpin the buffer since we're storing the block handle
-    buffer_manager.Unpin(block_handle);
+    // No need to unpin the block handle because it is automatically managed. Unpin happens when it goes out of scope
     
     return CacheEntry(std::move(block_handle), buffer_size);
 }

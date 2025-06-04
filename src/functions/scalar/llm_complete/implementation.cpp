@@ -53,7 +53,7 @@ void LlmComplete::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& stat
 
     auto cached_result = CacheManager::get_cached_result("ollama", "deepseek", CacheableFunction::LlmComplete, args, state);
     if (cached_result) {
-        std::cout << "Cached response retreived: " << *cached_result << std::endl;
+        std::cout << "Cached response retrieved: " << *cached_result << std::endl;
     }
 
     auto results = LlmComplete::Operation(args);
