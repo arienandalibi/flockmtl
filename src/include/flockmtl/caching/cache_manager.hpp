@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <shared_mutex>
+#include <mutex>
 
 namespace flockmtl {
 
@@ -56,6 +57,15 @@ class CacheManager {
 private:
     static std::unordered_map<std::string, std::unique_ptr<CacheTable>> cache_tables;
     static std::shared_mutex tables_mutex;
+    
+    // Automatic cleanup initialization
+    static std::once_flag cleanup_initialized;
+    static void register_cleanup_callback(duckdb::ExpressionState& state);
+    
+    // Inline initialization check for performance
+    static inline void ensure_cleanup_initialized(duckdb::ExpressionState& state) {
+        std::call_once(cleanup_initialized, register_cleanup_callback, std::ref(state));
+    }
     
     // Helper methods
     static std::string serialize_data_chunk(const duckdb::DataChunk& args);

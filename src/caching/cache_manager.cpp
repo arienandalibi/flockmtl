@@ -2,14 +2,33 @@
 #include "flockmtl/functions/batch_response_builder.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/common/enums/memory_tag.hpp"
+#include "duckdb/planner/extension_callback.hpp"
 #include <cstring>
 #include <sstream>
+#include <mutex>
 
 namespace flockmtl {
 
 // Static member definitions
 std::unordered_map<std::string, std::unique_ptr<CacheTable>> CacheManager::cache_tables;
 std::shared_mutex CacheManager::tables_mutex;
+std::once_flag CacheManager::cleanup_initialized;
+
+// Extension callback for cleanup
+class CacheCleanupCallback : public duckdb::ExtensionCallback {
+public:
+    ~CacheCleanupCallback() override {
+        // Cleanup when the callback itself is destroyed (during database shutdown)
+        CacheManager::clear_all_caches();
+    }
+};
+
+// Initialize the cleanup callback (called via std::call_once)
+void CacheManager::register_cleanup_callback(duckdb::ExpressionState& state) {
+    auto &db = duckdb::DatabaseInstance::GetDatabase(state.GetContext());
+    auto &config = duckdb::DBConfig::GetConfig(db);
+    config.extension_callbacks.push_back(std::make_unique<CacheCleanupCallback>());
+}
 
 // Convert CacheableFunction enum to string
 std::string to_string(CacheableFunction function) {
@@ -148,6 +167,9 @@ CacheTable* CacheManager::get_or_create_table(const std::string& table_name) {
 void CacheManager::store_result(const std::string& provider, const std::string& model, CacheableFunction function,
                                 const duckdb::DataChunk& args, const std::string& result,
                                 duckdb::ExpressionState& state) {
+    // Ensure cleanup callback is initialized (inline check)
+    ensure_cleanup_initialized(state);
+    
     std::string table_name = get_table_name(provider, model, function);
     std::string key = serialize_data_chunk(args);
     
@@ -165,6 +187,9 @@ std::unique_ptr<std::string> CacheManager::get_cached_result(const std::string& 
                                                             const std::string& model, CacheableFunction function,
                                                             const duckdb::DataChunk& args,
                                                             duckdb::ExpressionState& state) {
+    // Ensure cleanup callback is initialized (inline check)
+    ensure_cleanup_initialized(state);
+    
     std::string table_name = get_table_name(provider, model, function);
     
     {
@@ -200,7 +225,7 @@ bool CacheManager::is_cached(const std::string& provider, const std::string& mod
     }
 }
 
-//TODO: Mark all stored cache entries as can_destroy = True before clearing
+// No need to mark blocks as can_destroy = True, the fact that no pointers to them exist anymore is enough to delete them (destructor called)
 void CacheManager::clear_cache(const std::string& provider, const std::string& model, CacheableFunction function) {
     std::string table_name = get_table_name(provider, model, function);
     
@@ -211,7 +236,7 @@ void CacheManager::clear_cache(const std::string& provider, const std::string& m
     }
 }
 
-//TODO: Mark all stored cache entries as can_destroy = True before clearing
+// No need to mark blocks as can_destroy = True, the fact that no pointers to them exist anymore is enough to delete them (destructor called)
 void CacheManager::clear_all_caches() {
     std::unique_lock<std::shared_mutex> lock(tables_mutex);
     cache_tables.clear();
