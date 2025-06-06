@@ -50,14 +50,14 @@ std::vector<std::string> LlmComplete::Operation(duckdb::DataChunk& args) {
 }
 
 void LlmComplete::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& state, duckdb::Vector& result) {
-    auto cached_result = CacheManager::get_cached_result("ollama", "deepseek", CacheableFunction::LlmComplete, args, state);
+    auto cached_result = CacheManager::get_cached_result(CacheableFunction::LlmComplete, args, state);
     std::vector<std::string> results;
     if (cached_result) {
         std::cout << "Cached response retrieved: " << std::endl << *cached_result << std::endl;
         results.push_back(*cached_result);
     } else {
         results = LlmComplete::Operation(args);
-        CacheManager::store_result("ollama", "deepseek", CacheableFunction::LlmComplete, args, results[0], state);
+        CacheManager::store_results(CacheableFunction::LlmComplete, args, results, state);
     }
 
     auto index = 0;

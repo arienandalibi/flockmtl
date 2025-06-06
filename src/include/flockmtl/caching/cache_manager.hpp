@@ -2,6 +2,8 @@
 #include "flockmtl/core/common.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 #include "duckdb/storage/block_manager.hpp"
+#include "flockmtl/functions/batch_response_builder.hpp"
+
 #include <unordered_map>
 #include <string>
 #include <memory>
@@ -56,6 +58,8 @@ public:
 class CacheManager {
 private:
     static std::unordered_map<std::string, std::unique_ptr<CacheTable>> cache_tables;
+    // Maps model_name to the provider. WARNING: If the user changes the model using the same name, this won't update.
+    static std::unordered_map<std::string, std::string> model_providers;
     static std::shared_mutex tables_mutex;
     
     // Automatic cleanup initialization
@@ -68,23 +72,39 @@ private:
     }
     
     // Helper methods
-    static std::string serialize_data_chunk(const duckdb::DataChunk& args);
+    static std::pair<std::string, std::vector<std::string>> get_prompt_and_tuples(const duckdb::DataChunk& args);
     static CacheTable* get_or_create_table(const std::string& table_name);
+    static std::string retrieve_provider(const nlohmann::json& model_details_json);
+
+    // first is the provider, second is the model
+    static inline std::pair<std::string, std::string> get_provider_and_model(const duckdb::DataChunk& args) {
+        nlohmann::json model_details_json = CastVectorOfStructsToJson(args.data[0], 1)[0];
+        std::string model_name = model_details_json["model_name"].get<std::string>();
+
+        auto it = model_providers.find(model_name);
+
+        // cached, no need for database query, faster
+        if (it != model_providers.end()) {
+            return {it->second, model_name};
+        }
+
+        // retrieve provider name using database query and cache it
+        std::string provider_name = CacheManager::retrieve_provider(model_details_json);
+        model_providers[model_name] = provider_name;
+        return {provider_name, model_name};
+    }
 
 public:
     // Get table name for a specific provider/model/function combination
     static std::string get_table_name(const std::string& provider, const std::string& model, CacheableFunction function);
     
     // Store function result in cache
-    static void store_result(const std::string& provider, const std::string& model, CacheableFunction function,
-                             const duckdb::DataChunk& args, const std::string& result,
-                             duckdb::ExpressionState& state);
+    static void store_results(CacheableFunction function, const duckdb::DataChunk& args,
+                              const std::vector<std::string>& results, duckdb::ExpressionState& state);
     
     // Retrieve cached result if available
-    static std::unique_ptr<std::string> get_cached_result(const std::string& provider, 
-                                                         const std::string& model, CacheableFunction function,
-                                                         const duckdb::DataChunk& args,
-                                                         duckdb::ExpressionState& state);
+    static std::unique_ptr<std::string> get_cached_result(CacheableFunction function, const duckdb::DataChunk& args,
+                                                          duckdb::ExpressionState& state);
     
     // Check if result is cached
     static bool is_cached(const std::string& provider, const std::string& model, CacheableFunction function,

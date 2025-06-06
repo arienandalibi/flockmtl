@@ -6,11 +6,13 @@
 #include <cstring>
 #include <sstream>
 #include <mutex>
+#include <tuple>
 
 namespace flockmtl {
 
 // Static member definitions
 std::unordered_map<std::string, std::unique_ptr<CacheTable>> CacheManager::cache_tables;
+std::unordered_map<std::string, std::string> CacheManager::model_providers;
 std::shared_mutex CacheManager::tables_mutex;
 std::once_flag CacheManager::cleanup_initialized;
 
@@ -118,77 +120,90 @@ std::string CacheManager::get_table_name(const std::string& provider, const std:
 }
 
 // TODO: Fix this to extract each prompt/data combination from the aggregate of inputs so they can be cached separately
-std::string CacheManager::serialize_data_chunk(const duckdb::DataChunk& args) {
-    std::ostringstream oss;
-    
-    // Extract model details from args.data[0]
-    if (args.ColumnCount() > 0) {
-        auto model_details_json = CastVectorOfStructsToJson(args.data[0], 1)[0];
-        oss << "model:" << model_details_json.dump() << ";";
-    }
-    std::cout << "Testing, after model: " << oss.str() << std::endl;
+std::pair<std::string, std::vector<std::string>> CacheManager::get_prompt_and_tuples(const duckdb::DataChunk& args) {
+    std::vector<std::string> tuples_strings;
     
     // Extract prompt details from args.data[1]
-    if (args.ColumnCount() > 1) {
-        auto prompt_details_json = CastVectorOfStructsToJson(args.data[1], 1)[0];
-        oss << "prompt:" << prompt_details_json.dump() << ";";
-    }
-    std::cout << "Testing, after prompt: " << oss.str() << std::endl;
+    const auto prompt_details_json = CastVectorOfStructsToJson(args.data[1], 1)[0];
+    const std::string prompt = PromptManager::CreatePromptDetails(prompt_details_json).prompt;
+
     
     // Extract input tuples from args.data[2] if present
     if (args.ColumnCount() > 2) {
-        auto tuples = CastVectorOfStructsToJson(args.data[2], args.size());
-        oss << "tuples:";
-        for (size_t i = 0; i < tuples.size(); i++) {
-            oss << tuples[i].dump();
-            if (i < tuples.size() - 1) {
-                oss << ",";
-            }
-        }
-        oss << ";";
-        std::cout << "Testing, after input tuples: " << oss.str() << std::endl;
+        auto tuples_json = CastVectorOfStructsToJson(args.data[2], args.size());
+        tuples_strings.reserve(tuples_json.size());
+
+        // populate the tuples_strings vector. We keep the whole json because the key can change as well, which might change semantics
+        std::transform(tuples_json.begin(), tuples_json.end(),
+               std::back_inserter(tuples_strings),
+               [](const nlohmann::json& json_obj) -> std::string {
+                   return json_obj.dump();
+               });
     }
     
-    return oss.str();
+    return {prompt, tuples_strings};
 }
 
 CacheTable* CacheManager::get_or_create_table(const std::string& table_name) {
     std::unique_lock<std::shared_mutex> lock(tables_mutex);
-    
+
     auto it = cache_tables.find(table_name);
     if (it == cache_tables.end()) {
         cache_tables[table_name] = std::make_unique<CacheTable>();
         return cache_tables[table_name].get();
     }
-    
+
     return it->second.get();
 }
 
-void CacheManager::store_result(const std::string& provider, const std::string& model, CacheableFunction function,
-                                const duckdb::DataChunk& args, const std::string& result,
-                                duckdb::ExpressionState& state) {
+std::string CacheManager::retrieve_provider(const nlohmann::json& model_details_json) {
+    Model model(model_details_json);
+    return model.GetModelDetails().provider_name;
+}
+
+void CacheManager::store_results(CacheableFunction function, const duckdb::DataChunk& args,
+                                 const std::vector<std::string>& results, duckdb::ExpressionState& state) {
     // Ensure cleanup callback is initialized (inline check)
     ensure_cleanup_initialized(state);
+
+    auto [provider, model] = get_provider_and_model(args);
     
     std::string table_name = get_table_name(provider, model, function);
-    std::string key = serialize_data_chunk(args);
+    auto [prompt, tuples] = get_prompt_and_tuples(args);
     
     // Get BufferManager from the state's context
     auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
     
     CacheTable* table = get_or_create_table(table_name);
-    std::cout << "Testing, storing result." << std::endl;
-    std::cout << "Key: " << key << std::endl;
-    std::cout << "Result: " << result << std::endl;
-    table->put(key, result, buffer_manager);
+
+    // if there are no tuples, there is only a prompt and so there should only be one result
+    if (tuples.empty()) {
+        if (results.size() != 1) {
+            throw std::runtime_error("CacheManager::store_results: Only expected 1 result for 1 prompt");
+        }
+        table->put(prompt, results[0], buffer_manager);
+    } else {
+        if (results.size() != tuples.size()) {
+            const std::string err_msg = duckdb_fmt::format("CacheManager::store_results: There should the same number "
+                                                           "of tuples as results. Found {} tuples and {} results",
+                                                           tuples.size(), results.size());
+            throw std::runtime_error(err_msg);
+        }
+        for (int i = 0; i < tuples.size(); ++i) {
+            table->put(prompt + tuples[i], results[i], buffer_manager);
+            std::cout << "Testing, storing result." << std::endl;
+            std::cout << "Key: " << prompt + tuples[i] << std::endl;
+            std::cout << "Result: " << results[i] << std::endl;
+        }
+    }
 }
 
-std::unique_ptr<std::string> CacheManager::get_cached_result(const std::string& provider,
-                                                            const std::string& model, CacheableFunction function,
-                                                            const duckdb::DataChunk& args,
-                                                            duckdb::ExpressionState& state) {
+std::unique_ptr<std::string> CacheManager::get_cached_result(CacheableFunction function, const duckdb::DataChunk& args,
+                                                             duckdb::ExpressionState& state) {
     // Ensure cleanup callback is initialized (inline check)
     ensure_cleanup_initialized(state);
+
+    auto [provider, model] = get_provider_and_model(args);
     
     std::string table_name = get_table_name(provider, model, function);
     
@@ -199,12 +214,13 @@ std::unique_ptr<std::string> CacheManager::get_cached_result(const std::string& 
             return nullptr; // Table doesn't exist, no cached result
         }
         
-        std::string key = serialize_data_chunk(args);
+        auto [prompt, tuples] = get_prompt_and_tuples(args);
         
         // Get BufferManager from the state's context
         auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
         
         return it->second->get(key, buffer_manager);
+        // return std::make_unique<std::string>("test");
     }
 }
 
@@ -219,9 +235,10 @@ bool CacheManager::is_cached(const std::string& provider, const std::string& mod
             return false; // Table doesn't exist
         }
         
-        std::string key = serialize_data_chunk(args);
-        
+        std::string key = get_prompt_and_tuples(args);
+
         return it->second->contains(key);
+        // return true;
     }
 }
 
