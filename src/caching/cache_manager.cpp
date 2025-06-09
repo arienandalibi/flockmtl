@@ -78,30 +78,40 @@ CacheEntry CacheEntry::create(duckdb::BufferManager &buffer_manager, const std::
 }
 
 // CacheTable implementation
-void CacheTable::put(const std::string& key, const std::string& result, duckdb::BufferManager &buffer_manager) {
+void CacheTable::put(const std::string& prompt, const std::string& tuple, const std::string& result, duckdb::BufferManager &buffer_manager) {
     std::unique_lock<std::shared_mutex> lock(cache_mutex);
     
     // Create cache entry using buffer manager
     auto entry = std::make_unique<CacheEntry>(CacheEntry::create(buffer_manager, result));
-    cache_map[key] = std::move(entry);
+    cache_map[prompt][tuple] = std::move(entry);
 }
 
-std::unique_ptr<std::string> CacheTable::get(const std::string& key, duckdb::BufferManager &buffer_manager) {
+std::unique_ptr<std::string> CacheTable::get(const std::string& prompt, const std::string& tuple, duckdb::BufferManager &buffer_manager) {
     std::shared_lock<std::shared_mutex> lock(cache_mutex);
     
-    auto it = cache_map.find(key);
+    auto it = cache_map.find(prompt);
     if (it == cache_map.end()) {
+        return nullptr;
+    }
+
+    auto it2 = cache_map[prompt].find(tuple);
+    if (it2 == cache_map[prompt].end()) {
         return nullptr;
     }
     
     // Get result from buffer using pin/unpin pattern
-    auto result = it->second->get_result(buffer_manager);
+    auto result = it2->second->get_result(buffer_manager);
     return std::make_unique<std::string>(std::move(result));
 }
 
-bool CacheTable::contains(const std::string& key) {
+bool CacheTable::contains_prompt(const std::string& prompt) {
     std::shared_lock<std::shared_mutex> lock(cache_mutex);
-    return cache_map.find(key) != cache_map.end();
+    return cache_map.find(prompt) != cache_map.end();
+}
+
+bool CacheTable::contains(const std::string& prompt, const std::string& tuple) {
+    std::shared_lock<std::shared_mutex> lock(cache_mutex);
+    return cache_map.find(prompt) != cache_map.end() ? cache_map[prompt].find(tuple) != cache_map[prompt].end() : false;
 }
 
 size_t CacheTable::size() const {
@@ -119,7 +129,7 @@ std::string CacheManager::get_table_name(const std::string& provider, const std:
     return provider + "_" + model + "_" + to_string(function);
 }
 
-// TODO: Fix this to extract each prompt/data combination from the aggregate of inputs so they can be cached separately
+// Extracts each prompt/tuple combination from the aggregate of inputs so they can be cached separately
 std::pair<std::string, std::vector<std::string>> CacheManager::get_prompt_and_tuples(const duckdb::DataChunk& args) {
     std::vector<std::string> tuples_strings;
     
@@ -156,24 +166,19 @@ CacheTable* CacheManager::get_or_create_table(const std::string& table_name) {
     return it->second.get();
 }
 
-std::string CacheManager::retrieve_provider(const nlohmann::json& model_details_json) {
-    Model model(model_details_json);
-    return model.GetModelDetails().provider_name;
-}
-
 void CacheManager::store_results(CacheableFunction function, const duckdb::DataChunk& args,
                                  const std::vector<std::string>& results, duckdb::ExpressionState& state) {
     // Ensure cleanup callback is initialized (inline check)
     ensure_cleanup_initialized(state);
 
     auto [provider, model] = get_provider_and_model(args);
-    
+
     std::string table_name = get_table_name(provider, model, function);
     auto [prompt, tuples] = get_prompt_and_tuples(args);
-    
+
     // Get BufferManager from the state's context
     auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
-    
+
     CacheTable* table = get_or_create_table(table_name);
 
     // if there are no tuples, there is only a prompt and so there should only be one result
@@ -181,7 +186,7 @@ void CacheManager::store_results(CacheableFunction function, const duckdb::DataC
         if (results.size() != 1) {
             throw std::runtime_error("CacheManager::store_results: Only expected 1 result for 1 prompt");
         }
-        table->put(prompt, results[0], buffer_manager);
+        table->put(prompt, "", results[0], buffer_manager);
     } else {
         if (results.size() != tuples.size()) {
             const std::string err_msg = duckdb_fmt::format("CacheManager::store_results: There should the same number "
@@ -189,57 +194,93 @@ void CacheManager::store_results(CacheableFunction function, const duckdb::DataC
                                                            tuples.size(), results.size());
             throw std::runtime_error(err_msg);
         }
-        for (int i = 0; i < tuples.size(); ++i) {
-            table->put(prompt + tuples[i], results[i], buffer_manager);
+        for (size_t i = 0; i < tuples.size(); ++i) {
+            table->put(prompt, tuples[i], results[i], buffer_manager);
             std::cout << "Testing, storing result." << std::endl;
-            std::cout << "Key: " << prompt + tuples[i] << std::endl;
+            std::cout << "Prompt: " << prompt << " ; Tuple: " << tuples[i] << std::endl;
             std::cout << "Result: " << results[i] << std::endl;
         }
     }
 }
 
-std::unique_ptr<std::string> CacheManager::get_cached_result(CacheableFunction function, const duckdb::DataChunk& args,
-                                                             duckdb::ExpressionState& state) {
+std::vector<std::unique_ptr<std::string>> CacheManager::get_cached_results(CacheableFunction function,
+                                                                           const duckdb::DataChunk& args,
+                                                                           duckdb::ExpressionState& state) {
     // Ensure cleanup callback is initialized (inline check)
     ensure_cleanup_initialized(state);
 
     auto [provider, model] = get_provider_and_model(args);
-    
+
     std::string table_name = get_table_name(provider, model, function);
-    
-    {
-        std::shared_lock<std::shared_mutex> lock(tables_mutex);
-        auto it = cache_tables.find(table_name);
-        if (it == cache_tables.end()) {
-            return nullptr; // Table doesn't exist, no cached result
+
+    auto [prompt, tuples] = get_prompt_and_tuples(args);
+
+    std::shared_lock<std::shared_mutex> lock(tables_mutex);
+    auto it = cache_tables.find(table_name);
+    if (it == cache_tables.end()) {
+        // Table doesn't exist, no cached results
+        if (tuples.empty()) {
+            return std::vector<std::unique_ptr<std::string>>(1);
+        } else {
+            return std::vector<std::unique_ptr<std::string>>(tuples.size());
         }
-        
-        auto [prompt, tuples] = get_prompt_and_tuples(args);
-        
-        // Get BufferManager from the state's context
-        auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
-        
-        return it->second->get(key, buffer_manager);
-        // return std::make_unique<std::string>("test");
     }
+
+    // Get BufferManager from the state's context
+    auto& buffer_manager = duckdb::BufferManager::GetBufferManager(state.GetContext());
+    std::vector<std::unique_ptr<std::string>> results;
+
+    if (tuples.empty()) {
+        results.push_back(it->second->get(prompt, "", buffer_manager));
+    } else {
+        results.reserve(tuples.size());
+        for (size_t i = 0; i < tuples.size(); ++i) {
+            results.push_back(it->second->get(prompt, tuples[i], buffer_manager));
+        }
+    }
+    
+    return results;
 }
 
-bool CacheManager::is_cached(const std::string& provider, const std::string& model, CacheableFunction function,
-                           const duckdb::DataChunk& args) {
-    std::string table_name = get_table_name(provider, model, function);
-    
-    {
-        std::shared_lock<std::shared_mutex> lock(tables_mutex);
-        auto it = cache_tables.find(table_name);
-        if (it == cache_tables.end()) {
-            return false; // Table doesn't exist
-        }
-        
-        std::string key = get_prompt_and_tuples(args);
+std::vector<bool> CacheManager::is_cached(CacheableFunction function, const duckdb::DataChunk& args) {
+    auto [provider, model] = get_provider_and_model(args);
 
-        return it->second->contains(key);
-        // return true;
+    std::string table_name = get_table_name(provider, model, function);
+
+    auto [prompt, tuples] = get_prompt_and_tuples(args);
+
+    std::shared_lock<std::shared_mutex> lock(tables_mutex);
+    auto it = cache_tables.find(table_name);
+    if (it == cache_tables.end()) {
+        if (tuples.empty()) {
+            return std::vector<bool>(1, false);
+        } else {
+            return std::vector<bool>(tuples.size(), false); // Table doesn't exist
+        }
     }
+
+    std::vector<bool> results;
+
+    if (tuples.empty()) {
+        results.push_back(it->second->contains(prompt, ""));
+    } else {
+        results.reserve(tuples.size());
+        for (size_t i = 0; i < tuples.size(); ++i) {
+            results.push_back(it->second->contains(prompt, tuples[i]));
+        }
+    }
+
+    return results;
+}
+
+bool CacheManager::all_is_cached(CacheableFunction function, const duckdb::DataChunk& args) {
+    std::vector<bool> cached_vec = CacheManager::is_cached(function, args);
+    for (const bool is_cached : cached_vec) {
+        if (!is_cached) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // No need to mark blocks as can_destroy = True, the fact that no pointers to them exist anymore is enough to delete them (destructor called)
