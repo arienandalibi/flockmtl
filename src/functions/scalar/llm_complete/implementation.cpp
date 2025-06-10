@@ -54,7 +54,7 @@ void LlmComplete::Execute(duckdb::DataChunk& args, duckdb::ExpressionState& stat
     std::vector<std::string> results;
     if (CacheManager::all_is_cached(CacheableFunction::LlmComplete, args)) {
         std::cout << "Cached responses retrieved: " << std::endl;
-        for (std::unique_ptr cached_result : cached_results) {
+        for (const std::unique_ptr<std::string>& cached_result : cached_results) {
             std::cout << *cached_result << std::endl;
             results.push_back(*cached_result);
         }

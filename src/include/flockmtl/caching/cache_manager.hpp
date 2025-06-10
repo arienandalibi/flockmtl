@@ -83,7 +83,7 @@ private:
     static inline std::pair<std::string, std::string> get_provider_and_model(const duckdb::DataChunk& args) {
         nlohmann::json model_details_json = CastVectorOfStructsToJson(args.data[0], 1)[0];
         std::string model_name = model_details_json["model_name"].get<std::string>();
-        std::shared_lock<std::shared_mutex> lock(providers_mutex);
+        std::shared_lock<std::shared_mutex> read_lock(providers_mutex);
 
         auto it = model_providers.find(model_name);
 
@@ -92,13 +92,21 @@ private:
             return {it->second, model_name};
         }
 
-        lock.unlock();
-        std::unique_lock<std::shared_mutex> lock2(providers_mutex);
+        read_lock.unlock();
 
         // retrieve provider name using database query and cache it
         Model model(model_details_json);
         std::string provider_name = model.GetModelDetails().provider_name;
-        model_providers[model_name] = provider_name;
+
+        std::unique_lock<std::shared_mutex> write_lock(providers_mutex);
+        // entry could have changed while we didn't have the lock, we need to check again
+        if (model_providers.find(model_name) == model_providers.end()) {
+            model_providers[model_name] = provider_name;
+        } else {
+            // if model_name was added to model_providers, we wanna use this information for consistency
+            provider_name = model_providers[model_name];
+        }
+        
         return {provider_name, model_name};
     }
 

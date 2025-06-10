@@ -14,6 +14,7 @@ namespace flockmtl {
 std::unordered_map<std::string, std::unique_ptr<CacheTable>> CacheManager::cache_tables;
 std::unordered_map<std::string, std::string> CacheManager::model_providers;
 std::shared_mutex CacheManager::tables_mutex;
+std::shared_mutex CacheManager::providers_mutex;
 std::once_flag CacheManager::cleanup_initialized;
 
 // Extension callback for cleanup
